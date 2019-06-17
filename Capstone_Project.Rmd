@@ -1,0 +1,432 @@
+---
+title: "Capstone Project"
+author: "Astrid Melhado Dyer"
+date: "6/14/2019"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 4
+    number_sections: true
+
+---
+For this submission, I will explore the BostonHouse2 data set. Fully interested in developing predictive models for sustainable low-income housing projects, the current data set is fit for the purpose. The goal as prescribed by the assignment prompt is to create a machine learning model to showcase the data scientist skills gained through the learning path.
+
+## Problem Definition
+
+A regression task meant to create a machine learning model to predict the corrected median value of owner-occupied homes in USD 1000's (cmedv-target variable) based on 18 features pertaining to the BostonHousing2 data set
+
+## General Considerations
+
+Due to the pedagogic nature of the assignment, selected pieces of code are displayed when deemed appropriate. On the other hand, to not interrupt the report flow, the eval parameter of the r chunks corresponding to the final model have been set to FALSE as it takes more than 15 pages to be reproduced. However, in the Rmd file containing the r script the eval parameter is set to TRUE for reproducibility’s purpose.
+
+## The Data
+
+The BostonHousing2 data set is a corrected version of its predecessor: BostonHousing data set by Harrison and Rubinfeld (1979). Originally, it contained housing data for 506 census tracts of Boston from the 1970 census. 5 variables have been added to the corrected version for a total of 506 observations and 19 features. 
+
+### Data Loading and R packages.
+The data corresponds to a curated list of data sets cleaned and ready for machine learning analysis to be found in the mlbench package. Original data set has been taken from the UCI Repository of Machine Learning Databases ^[http://www.ics.uci.edu/~mlearn/MLRepository.html]and the corrected version from Statlib^[http://lib.stat.cmu.edu/datasets/].
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+library(mlbench)
+library(caret)
+library(dplyr)
+library(psych)
+library(knitr)
+library(kableExtra)
+library(corrplot)
+library(rpart)
+library(kernlab)
+library(gbm)
+library(randomForest)
+library(Cubist)
+data("BostonHousing2")
+```
+
+### Create Data Partition
+
+As expected, data is being partitioned in a set of data destined to train the model (train set) and in a set of data(test set) that we hold on until the end of the project to confirm the accuracy of the model on unseen data.
+
+
+```{r echo= TRUE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+set.seed(13) # for reproducibility's purpose
+train_index <- createDataPartition(BostonHousing2$cmedv, p=0.80, list = FALSE)
+train_set <- BostonHousing2[train_index,]
+test_set <- BostonHousing2[-train_index,]
+```
+
+## Descriptive Statistcs
+
+The objective of this segment is to create meaningful summaries about the sample that may form the basis of an extensive statistical analysis in order to craft the best fit. 
+
+### Quantitative Summary
+
+Looking at the data types of the following attributes, we found two of the features being factors:
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+sapply(train_set, class)
+```
+
+The first 6 rows of our data set.
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+train_set <- train_set  %>% mutate(chas = as.numeric(as.character(chas)),
+                                   town = as.numeric(as.factor(town))) %>%
+  select(-medv) %>% select(cmedv, everything())
+kable(head(train_set),format="latex", booktabs=TRUE) %>% 
+  kable_styling(latex_options="scale_down")
+```
+
+
+Some measures have been taken:
+
+*  All features must be numeric. Transform **town** and **chas** variables
+* Remove **medv** column. The later has been the target variable in the original data set.  Since we are working on the **BostonHousing2** data set, it has been substituted by **cmedv**.  
+* We order the columns placing the target variable **cmedv** first for for manageability’s purposes 
+
+Confirming the data dimension is just the beginning.
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+dim(train_set)
+```
+
+Now, it is advisable to take a peek of the several distributions. 
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+tab <- describe(train_set[,2:18])
+
+tab %>% mutate(SKEW = cell_spec(skew, "latex", color = ifelse(skew > 0.5 | skew < -0.5, "red", "black")),
+  KURTOSIS = cell_spec(kurtosis, "latex", color = ifelse(kurtosis > 3 | kurtosis < -3, "blue", "black"))) %>%
+  select(-skew, -kurtosis) %>%
+  kable(format = "latex", escape = FALSE, booktabs=TRUE, linesep ="") %>%
+  kable_styling(latex_options="scale_down") 
+```
+
+Let us recapitulate our findings, so far:
+
+* Attributes’ scales are all over the place
+* Some features exhibit moderate to high skewness; signaled in red.
+* Some features exhibit noticeable kurtosis, mainly leptokurtic distributions.
+
+### Visualizations
+
+
+The following display evidences the skewness already seen in some of the distributions It looks like **rad** and **tax** are clearly bimodal, and some columns might show exponential distributions, as well.
+
+#### Density Plots
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA, fig.height= 7, fig.width= 7}
+par(mfrow=c(3,6))
+for(i in 2:18) {
+  plot(density(train_set[,i]), main=names(train_set)[i])}
+```
+
+
+To confirm our suspicions, let us glimpse for the outliers beyond the whiskers of the enclosed boxplots:
+
+#### Boxplots
+
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA, fig.height= 8, fig.width= 8}
+par(mfrow=c(3,6))
+for(i in 2:18) {
+boxplot(train_set[,i], main=names(train_set)[i])
+}
+
+```
+
+Above summaries hint to the following tranformations:
+
+* To reduce the effect of different scales: normalize.
+* To reduce the effect of different distributions: standardize.
+* To make the distributions Gaussian-like: apply a Box-Cox transformation assuming positive values.
+
+### Looking for Collinearity
+
+Removing highly correlated features would lead to an improvement of the the accuracy of our model. We are able to spot in the attached correlation plot some deep-red dots. 
+
+#### Correlation Plot
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA, fig.align='left'}
+correlations <- cor(train_set[,2:18])
+corrplot(correlations, method="circle")
+```
+
+#### Pruning Highly Correlated Features
+
+A threshold of 0.75 is established, above that the features will be removed by the following piece of code:
+
+```{r echo= TRUE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+set.seed(13)
+cutoff <- 0.75
+correlations <- cor(train_set[,2:18])
+highlyCorrelated <- findCorrelation(correlations, cutoff=cutoff)
+for (value in highlyCorrelated) {
+  print(names(train_set)[value])
+}
+```
+
+The new dimensions of our data set:
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+train_set_1 <- train_set[,-highlyCorrelated]
+dim(train_set_1)
+
+```
+
+
+## In search of the Right Algorithm
+
+Summaries have done their work; however,the algorithm that will work in this case is still unknown. The task is  spot-check several algorithms 
+
+### Test Harness Design
+
+* Based on above findings, we will center, scale, and apply a Box-Cox transformation to the data set. The aim is for all attributes to have a mean value of 0 and a standard deviation of 1. 
+* Test configuration: 10 cross-validation with 3 repeats
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+trainControl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)#Standard approach
+metric <- "RMSE"
+```
+
+* A combination of linear and non-linear algorithm suited for regression are displayed in the following piece of code. All of them use default tuning parameters except CART which uses 3 supplementary parameters.
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+
+#lm
+set.seed(13)
+fit.lm <- train(cmedv~., data=train_set_1, method="lm", metric=metric, preProc=c("center",
+"scale", "BoxCox"), trControl=trainControl)
+#glm
+set.seed(13)
+fit.glm <- train(cmedv~., data=train_set_1, method="glm", metric=metric, preProc=c("center",
+"scale", "BoxCox"), trControl=trainControl)
+#rpart
+set.seed(13)
+grid <- expand.grid(.cp=c(0, 0.05, 0.1))
+fit.rpart<- train(cmedv~., data=train_set_1, method="rpart", metric=metric, tuneGrid = grid, preProc=c("center",
+"scale", "BoxCox"), trControl=trainControl)
+#svm
+set.seed(13)
+fit.svm <- train(cmedv~., data=train_set_1, method="svmRadial", metric=metric, preProc=c("center",
+"scale", "BoxCox"), trControl=trainControl)
+#KNN
+set.seed(13)
+fit.knn <- train(cmedv~., data=train_set_1, method="knn", metric=metric, preProc=c("center",
+"scale", "BoxCox"), trControl=trainControl)
+#GBM
+set.seed(13)
+fit.gbm <- train(cmedv~., data=train_set_1, method="gbm", metric=metric, preProc=c("center",
+"scale", "BoxCox"), trControl=trainControl, verbose = FALSE)
+#RF
+set.seed(13)
+fit.rf <- train(cmedv~., data=train_set_1, method="rf", metric=metric, preProc=c("center",
+"scale", "BoxCox"),trControl=trainControl)
+#Cubist
+set.seed(13)
+fit.cubist <- train(cmedv~., data=train_set_1, method="cubist", metric=metric,
+preProc=c("center","scale", "BoxCox"), trControl=trainControl)
+results <- resamples(list(LM=fit.lm, GLM=fit.glm, CART=fit.rpart, SVM=fit.svm, KNN = fit.knn,
+                          GBM=fit.gbm, RF=fit.rf, CUBIST=fit.cubist))
+```
+
+Metrics used to estimate performance:
+
+**MAE** or mean absolute error is a measure of difference between two continuous variable. As the name implies, it is an average of the absolute errors.
+
+**RMSE** or root mean square error is the standard deviation of the residuals (prediction errors).
+
+**Rsquared** coefficient of determination provides a goodness-of-measure for the predictions of the observations, a value between 0 and 1.
+
+
+```{r echo=FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+summary(results)
+```
+
+
+### Visualizing the results  
+
+We use a dotplot  to show a 95% Confidence Intervals for estimated metrics
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+#Comparing the models: box and whisker plots
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+bwplot(results, scales=scales)
+```
+
+It looks like non-linear algorithms exhibit better performance than the linear ones. Among them the RF and Cubist have the lowest RMSE.
+
+As a precaution, let us check that our selected models are not strongly correlated to each other.  
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+# Comparing selected models: xyplot
+xyplot(results, models=c("CUBIST", "RF"))
+
+```
+
+## Improving the Selected Models
+
+### Tuning the Random Forest Algorithm
+
+We undertake a manual search to determine the optimal number of trees and mtry. Code is borrowed from indicated site.^[htpps://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/]
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA }
+# Manual Search
+trainControl <- trainControl(method="repeatedcv", number=10, repeats=3, search="grid")
+metric <- "RMSE"
+tunegrid <- expand.grid(.mtry=c(sqrt(ncol(train_set_1))))
+modellist <- list()
+for (ntree in c(500, 1000, 1500, 2000)) {
+set.seed(13)
+fit <- train(cmedv~., data = train_set_1, method="rf", metric=metric, tuneGrid=tunegrid,
+trControl=trainControl, ntree=ntree)
+key <- toString(ntree)
+modellist[[key]] <- fit
+}
+# compare results
+results <- resamples(modellist)
+summary(results)
+dotplot(results)
+```
+
+
+### Tune the Cubist Algorithm
+
+The cubist model uses a scheme called committees where iterative models trees are created. The final prediction is the resulting average of the predictions from each model tree. We have selected a short Fibonacci series to satisfy the “neighbors” parameter.
+
+
+```{r echo= FALSE, eval=TRUE, message=FALSE, warning=FALSE, comment=NA}
+#Tune the Cubist model
+trainControl <- trainControl(method="repeatedcv", number=10, repeats=3)
+metric <- "RMSE"
+set.seed(13)
+tunegrid <- expand.grid(.committees=seq(10, 25, by=1), .neighbors=c(2, 3, 5, 8))
+cubist_tuning <- train(cmedv~., data=train_set_1, method="cubist", metric=metric,
+preProc=c("center", "scale", "BoxCox"), tuneGrid=tunegrid, trControl=trainControl)
+print(cubist_tuning)
+plot(cubist_tuning)
+
+```
+
+The results are self-explanatory: the optimal combination occurs at committee 24, neighbor 2.
+
+## Final Model
+
+Based on above findings, the cubist model better captures the data features; we are ready to train our model
+
+### Train the Final Model
+```{r echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE, comment=NA}
+set.seed(13)
+x <- train_set_1[,2:14]
+y <- train_set_1[,1]
+preprocessed_data <- preProcess(x, method=c("center", "scale", "BoxCox"))
+x_preprocessed <- predict(preprocessed_data, x)
+finalModel <- cubist(x=x_preprocessed, y=y, committees=24)
+summary(finalModel)
+```
+
+We perform same transformation on the test set as the ones applied to our train set, and reassure ourselves that both sets have the same shape
+
+```{r echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE, comment=NA}
+# transform the validation dataset
+set.seed(13)
+test_set_1 <- test_set %>% mutate(chas = as.numeric(as.character(chas)),
+                                   town = as.numeric(as.factor(town))) %>%
+  select(-medv, -rad, -town, -chas, -rm) %>% select(cmedv, everything())
+new_df <- setdiff(train_set_1, test_set_1)
+new_df
+```
+
+### Making Predictions on the Test Dataset
+
+```{r echo=TRUE, eval= FALSE, message=FALSE, warning=FALSE, comment=NA}
+test_set_x <- test_set_1[,2:14]
+test_set_y <- test_set_1[,1]
+test_set_x_preprocessed <- predict(preprocessed_data, test_set_x)
+# use final model to make predictions on the validation dataset
+predictions <- predict(finalModel, newdata=test_set_x_preprocessed, neighbors=2)
+# calculate Metrics
+rmse <- RMSE(predictions, test_set_y)
+r2 <- R2(predictions, test_set_y)
+```
+
+**Rsquared** = 0.8073963
+
+**RMSE** = 4.140558
+
+
+## Conclusions
+
+Let us say that R2 is moderately satisfactory, but RMSE is on the high side, some steps to improve the model.
+
+* With this particualr data, non-Linear models perform better than linear ones.A diversity of non-linear algorithms should be tested  focusing in boosting-like models characterized by iterative tree creation.
+* Additional approaches could be taking, for example: stacking. Meaning blending the predictions of multiples well performing models. 
+* Utilize more sophisticated transformations as Yeo-Johnson power transformation which is not sensitive to negative values.  
+
+## Works Cited
+
+### Data
+Newman, D.J. & Hettich, S. & Blake, C.L. & Merz, C.J. (1998). UCI Repository of machine learning
+databases [http://www.ics.uci.edu/~mlearn/MLRepository.html]. Irvine, CA: University of California,
+Department of Information and Computer Science.
+
+### books
+Mangiafico, S.S. 2016. Summary and Analysis of Extension Program Evaluation in R, 
+version 1.18.1. rcompanion.org/handbook/. (Pdf version: rcompanion.org/documents/RHandbookProgramEvaluation.pdf.)
+
+Brownlee, Jason. 2017. Machine Learning Mastery With R.
+version v1.6.(Pdf version: Machine Learning Mastery With R.pdf)
+
+### R packages
+caret
+Max Kuhn. Contributions from Jed Wing, Steve Weston, Andre Williams, Chris Keefer, Allan Engelhardt, Tony
+Cooper, Zachary Mayer, Brenton Kenkel, the R Core Team, Michael Benesty, Reynald Lescarbeau, Andrew Ziem,
+Luca Scrucca, Yuan Tang, Can Candan and Tyler Hunt. (2019). caret: Classification and Regression
+Training. R package version 6.0-84. https://CRAN.R-project.org/package=caret
+
+corrplot
+Taiyun Wei and Viliam Simko (2017). 
+R package "corrplot": Visualization of a Correlation Matrix (Version 0.84). 
+Available from https://github.com/taiyun/corrplot
+
+Cubist
+Max Kuhn and Ross Quinlan (2018). Cubist: Rule- And Instance-Based Regression Modeling. R package version
+  0.2.2. https://CRAN.R-project.org/package=Cubist
+
+gbm
+Brandon Greenwell, Bradley Boehmke, Jay Cunningham and GBM Developers (2019). gbm: Generalized Boosted
+Regression Models. R package version 2.1.5. https://CRAN.R-project.org/package=gbm
+
+kableExtra
+Hao Zhu (2019). kableExtra: Construct Complex Table with 'kable' and Pipe Syntax. R package version 1.1.0.
+  https://CRAN.R-project.org/package=kableExtra
+
+kernlab
+Alexandros Karatzoglou, Alex Smola, Kurt Hornik, Achim Zeileis (2004). kernlab - An S4 Package for Kernel
+  Methods in R. Journal of Statistical Software 11(9), 1-20. URL http://www.jstatsoft.org/v11/i09/
+
+knitr
+Yihui Xie (2019). knitr: A General-Purpose Package for Dynamic Report Generation in R. R package version
+  1.23.
+
+  Yihui Xie (2015) Dynamic Documents with R and knitr. 2nd edition. Chapman and Hall/CRC. ISBN 978-1498716963
+
+  Yihui Xie (2014) knitr: A Comprehensive Tool for Reproducible Research in R. In Victoria Stodden, Friedrich
+  Leisch and Roger D. Peng, editors, Implementing Reproducible Computational Research. Chapman and Hall/CRC.
+  ISBN 978-1466561595
+
+
+mlbench
+Friedrich Leisch & Evgenia Dimitriadou (2010). mlbench: Machine Learning Benchmark Problems. R package
+version 2.1-1.
+
+psych
+Revelle, W. (2018) psych: Procedures for Personality and Psychological Research, Northwestern University,
+Evanston, Illinois, USA, https://CRAN.R-project.org/package=psych Version = 1.8.12.
+
+randomForest
+Liaw and M. Wiener (2002). Classification and Regression by randomForest. R News 2(3), 18--22.
+
+rpart
+Terry Therneau and Beth Atkinson (2019). rpart: Recursive Partitioning and Regression Trees. R package
+  version 4.1-15. https://CRAN.R-project.org/package=rpart
